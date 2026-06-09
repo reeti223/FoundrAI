@@ -289,3 +289,5 @@ Run in order in Supabase → SQL Editor:
 ## License
 
 MIT License.
+#   F o u n d r A I  
+ 

@@ -20,7 +20,12 @@ export function RegisterPage() {
       options: { data: { full_name: fullName } }
     });
     if (error) { setError(error.message); setLoading(false); }
-    else navigate("/dashboard");
+else {
+  setLoading(false);
+  navigate("/auth/login", {
+    state: { message: "Account created! Check your email to confirm, then sign in." }
+  });
+}
   }
 
   return (

@@ -26,20 +26,16 @@ _jwks_cache: dict[str, list] = {}
 
 
 def _fetch_jwks(supabase_url: str) -> list:
-    """Fetch and cache Supabase's public JWKS keys (used for ES256 verification)."""
-    if supabase_url in _jwks_cache:
-        return _jwks_cache[supabase_url]
+    """Fetch Supabase's public JWKS keys (no cache)."""
     try:
         resp = httpx.get(f"{supabase_url}/auth/v1/.well-known/jwks.json", timeout=5)
         resp.raise_for_status()
         keys = resp.json().get("keys", [])
-        _jwks_cache[supabase_url] = keys
         logger.info("JWKS fetched: %d key(s) from %s", len(keys), supabase_url)
         return keys
     except Exception as exc:
         logger.warning("JWKS fetch failed: %s", exc)
         return []
-
 
 def _verify_es256(token: str, supabase_url: str) -> Optional[dict]:
     """Verify an ES256 token using Supabase's public JWKS."""

@@ -41,25 +41,27 @@ def _fetch_upload_context(founder_id: str, upload_id: Optional[str], sb) -> str:
         meta = urow.data
         filename = meta.get("filename", "file")
 
-        # Financial CSV: return actual row-level data
+        # NOTE: there is no `financial_rows` table in this project (the schema
+        # only has chunks/founders/query_history/uploads), so row-level
+        # financial data is read back out of `chunks` instead, where
+        # indexer.py stores each CSV row-chunk as plain text content.
         rows_res = (
-            sb.table("financial_rows")
-            .select("month,revenue,burn_rate,headcount,cac,ltv")
+            sb.table("chunks")
+            .select("content")
             .eq("upload_id", upload_id)
             .eq("founder_id", founder_id)
-            .order("month")
+            .order("created_at")
             .execute()
         )
         if rows_res.data:
-            lines = [f"FILE: {filename}", "month,revenue,burn_rate,headcount,cac,ltv"]
+            lines = [f"FILE: {filename}"]
             for r in rows_res.data:
-                lines.append(
-                    f"{r.get('month','')},{r.get('revenue',0)},{r.get('burn_rate',0)},"
-                    f"{r.get('headcount',0)},{r.get('cac',0)},{r.get('ltv',0)}"
-                )
+                content = r.get("content")
+                if content:
+                    lines.append(content)
             return "\n".join(lines)
 
-        # Non-financial: use metadata + extracted metrics
+        # Fallback: use upload metadata + extracted metrics if no chunks yet
         cols = meta.get("columns") or []
         metrics = meta.get("initial_metrics") or {}
         lines = [
@@ -87,16 +89,16 @@ async def get_chat_history(
     limit: int = 50,
     founder: dict = Depends(verify_jwt),
 ):
-    """Retrieve the latest chat history for the founder."""
+    """Retrieve the latest question/answer history for the founder."""
     founder_id = founder.get("sub")
     sb = get_supabase_client()
     if sb is None:
         return []
-    
+
     try:
         result = (
-            sb.table("chat_history")
-            .select("id, role, content, agent_details, created_at, upload_id")
+            sb.table("query_history")
+            .select("id, question, answer, upload_id, created_at")
             .eq("founder_id", founder_id)
             .order("created_at", desc=False)
             .limit(limit)
@@ -114,7 +116,7 @@ async def query(
     request: Request,
     founder: dict = Depends(verify_jwt),
 ) -> StreamingResponse:
-    """Stream a multi-agent analysis and save to chat history."""
+    """Stream a multi-agent analysis and save the Q&A pair to query_history."""
     founder_id: str = founder["sub"]
     logger.info("Query from founder=%s question=%r", founder_id, body.question[:80])
 
@@ -124,21 +126,8 @@ async def query(
     # Fetch direct CSV data so the LLM can analyze it without relying solely on RAG
     csv_context = _fetch_upload_context(founder_id, body.upload_id, sb)
 
-    # 1. Save user message to DB
-    if sb:
-        try:
-            sb.table("chat_history").insert({
-                "founder_id": founder_id,
-                "role": "user",
-                "content": body.question,
-                "upload_id": body.upload_id
-            }).execute()
-        except Exception as exc:
-            logger.error("Failed to save user message: %s", exc)
-
     async def event_stream():
         full_response = ""
-        agent_details = []
         try:
             async for chunk in run_pipeline(
                 question=body.question,
@@ -149,34 +138,27 @@ async def query(
                 if await request.is_disconnected():
                     logger.info("Client disconnected — stopping stream")
                     break
-                
-                # Intercept for persistence
+
+                # Accumulate the final answer text for persistence
                 if chunk.startswith("event: synthesis_chunk"):
                     try:
                         data = json.loads(chunk.split("data: ")[1])
                         full_response += data.get("text", "")
-                    except: pass
-                elif chunk.startswith("event: agent_update"):
-                    try:
-                        data = json.loads(chunk.split("data: ")[1])
-                        agent_details.append({
-                            "name": data.get("agent_name"),
-                            "content": data.get("content")
-                        })
-                    except: pass
+                    except Exception:
+                        pass
                 elif chunk.startswith("event: final"):
-                    # 2. Save assistant response to DB when complete
+                    # Save the completed question/answer pair as a single row,
+                    # matching query_history's actual (question, answer) schema.
                     if sb and full_response:
                         try:
-                            sb.table("chat_history").insert({
+                            sb.table("query_history").insert({
                                 "founder_id": founder_id,
-                                "role": "assistant",
-                                "content": full_response,
-                                "agent_details": agent_details,
-                                "upload_id": body.upload_id
+                                "question": body.question,
+                                "answer": full_response,
+                                "upload_id": body.upload_id,
                             }).execute()
                         except Exception as exc:
-                            logger.error("Failed to save assistant message: %s", exc)
+                            logger.error("Failed to save query history: %s", exc)
 
                 yield chunk
         except Exception as exc:

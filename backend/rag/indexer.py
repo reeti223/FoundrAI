@@ -17,15 +17,8 @@ CHUNK_OVERLAP = 80    # overlap between chunks
 
 
 def _chunk_text(text: str) -> List[str]:
-    """Split text into overlapping chunks by character count.
-
-    Args:
-        text: Raw text to chunk.
-
-    Returns:
-        List of chunk strings.
-    """
-    size = CHUNK_SIZE * 4       # approx chars per token
+    """Split text into overlapping chunks by character count."""
+    size = CHUNK_SIZE * 4
     overlap = CHUNK_OVERLAP * 4
     chunks, start = [], 0
     while start < len(text):
@@ -38,20 +31,23 @@ def _chunk_text(text: str) -> List[str]:
 
 
 def _csv_to_text(file_bytes: bytes) -> str:
-    """Convert a CSV file to a readable text representation for embedding.
-
-    Args:
-        file_bytes: Raw CSV bytes.
-
-    Returns:
-        Human-readable string summarising all CSV rows.
-    """
+    """Convert a CSV file to a readable text representation for embedding."""
     try:
         df = pd.read_csv(io.BytesIO(file_bytes))
-        # to_csv with | separator is extremely fast compared to iterrows
         return "Columns: " + ", ".join(df.columns) + "\n" + df.to_csv(sep="|", index=False, header=False)
     except Exception as e:
         logger.error("CSV to text conversion failed: %s", e)
+        return file_bytes.decode("utf-8", errors="replace")
+
+
+def _pdf_to_text(file_bytes: bytes) -> str:
+    """Extract text from a PDF file."""
+    try:
+        import pypdf
+        reader = pypdf.PdfReader(io.BytesIO(file_bytes))
+        return "\n".join(page.extract_text() or "" for page in reader.pages)
+    except Exception as e:
+        logger.error("PDF to text conversion failed: %s", e)
         return file_bytes.decode("utf-8", errors="replace")
 
 
@@ -62,23 +58,17 @@ def index_document(
     source_filename: str,
     supabase_client=None,
 ) -> int:
-    """Chunk, encode, and upsert a document's embeddings into pgvector.
-
-    Args:
-        content: Raw file bytes (CSV supported; plain text also works).
-        founder_id: UUID of the owning founder (used for RLS filtering).
-        doc_type: One of 'financial', 'news', 'manual'.
-        source_filename: Original filename for display in retrieved results.
-        supabase_client: Supabase client instance. If None, skips DB write
-                         (useful for offline/test mode).
-
-    Returns:
-        Number of chunks indexed.
-    """
-    # Convert CSV to text; treat everything else as plain text
+    """Chunk, encode, and upsert a document's embeddings into pgvector."""
+    # Convert based on file type
     try:
-        text = _csv_to_text(content)
-    except Exception:
+        if source_filename.lower().endswith(".pdf"):
+            text = _pdf_to_text(content)
+        elif source_filename.lower().endswith(".csv"):
+            text = _csv_to_text(content)
+        else:
+            text = content.decode("utf-8", errors="replace")
+    except Exception as e:
+        logger.error("File conversion failed: %s", e)
         text = content.decode("utf-8", errors="replace")
 
     chunks = _chunk_text(text)
@@ -123,12 +113,7 @@ def index_document(
 
 
 def delete_founder_index(founder_id: str, supabase_client=None) -> None:
-    """Remove all embeddings for a founder from pgvector.
-
-    Args:
-        founder_id: UUID of the founder whose index to clear.
-        supabase_client: Supabase client instance.
-    """
+    """Remove all embeddings for a founder from pgvector."""
     if supabase_client is None:
         logger.info("delete_founder_index (no DB): founder=%s", founder_id)
         return

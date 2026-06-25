@@ -56,9 +56,14 @@ def index_document(
     founder_id: str,
     doc_type: str,
     source_filename: str,
+    upload_id: str,
     supabase_client=None,
 ) -> int:
-    """Chunk, encode, and upsert a document's embeddings into pgvector."""
+    """Chunk, encode, and upsert a document's embeddings into pgvector.
+
+    Note: upload_id must be the id of the corresponding row in the
+    `uploads` table, since `chunks.upload_id` is a foreign key to it.
+    """
     # Convert based on file type
     try:
         if source_filename.lower().endswith(".pdf"):
@@ -89,19 +94,21 @@ def index_document(
     rows = [
         {
             "id": str(uuid.uuid4()),
+            "upload_id": upload_id,
             "founder_id": founder_id,
-            "doc_type": doc_type,
-            "source_filename": source_filename,
-            "chunk_text": chunk,
-            "chunk_index": i,
+            "content": chunk,
             "embedding": embeddings[i].tolist(),
-            "metadata": {"doc_type": doc_type},
+            "metadata": {
+                "doc_type": doc_type,
+                "source_filename": source_filename,
+                "chunk_index": i,
+            },
         }
         for i, chunk in enumerate(chunks)
     ]
 
     try:
-        supabase_client.table("document_embeddings").upsert(rows).execute()
+        supabase_client.table("chunks").upsert(rows).execute()
         logger.info(
             "Indexed %d chunks for founder=%s file=%s", len(rows), founder_id, source_filename
         )
@@ -118,7 +125,7 @@ def delete_founder_index(founder_id: str, supabase_client=None) -> None:
         logger.info("delete_founder_index (no DB): founder=%s", founder_id)
         return
     try:
-        supabase_client.table("document_embeddings").delete().eq(
+        supabase_client.table("chunks").delete().eq(
             "founder_id", founder_id
         ).execute()
         logger.info("Deleted all embeddings for founder=%s", founder_id)
